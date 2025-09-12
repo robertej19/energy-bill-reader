@@ -7,14 +7,15 @@ import fitz  # PyMuPDF
 from PIL import Image
 import pandas as pd
 import pytesseract
+from config import local_params as lp
 
 def parse_args():
     p = argparse.ArgumentParser(description="OCR each PDF page as a single image (no region slicing).")
     p.add_argument(
         "--input_path",
         type=str,
-        default="pdfs/example_2.pdf",
-        help="PDF file or directory containing PDFs (default: pdfs/example_2.pdf)",
+        default=None,
+        help="PDF file or directory containing PDFs (default: lp.pdf_directory)",
     )
     p.add_argument("--out", type=str, default="out_ocr", help="Output dir")
     p.add_argument("--dpi", type=int, default=350, help="Rasterization DPI")
@@ -129,7 +130,7 @@ def process_pdf(pdf_path: Path, out_root: Path, dpi: int, lang: str, psm: int,
 
 def main():
     args = parse_args()
-    in_path = Path(args.input_path)
+    in_path = Path(args.input_path) if args.input_path else lp.pdf_directory
     out_root = Path(args.out); out_root.mkdir(parents=True, exist_ok=True)
     pdfs = discover_pdfs(in_path)
     if not pdfs:

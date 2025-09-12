@@ -3,6 +3,8 @@ import shutil
 import subprocess
 from pathlib import Path
 import sys
+import time
+from config import local_params as lp
 
 TEX = r"""
 \documentclass[11pt]{article}
@@ -43,9 +45,19 @@ Visit \href{https://www.latex-project.org/}{LaTeX Project}.
 """
 
 def main():
-    out_dir = Path(".").resolve()
+    # Output directory for PDFs
+    synth_pdfs_dir = lp.latex_pdf_directory
+    synth_pdfs_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Use Unix timestamp for filename
+    timestamp = int(time.time())
+    pdf_filename = f"{timestamp}.pdf"
+    pdf_path = synth_pdfs_dir / pdf_filename
+    
+    # Work in a temp directory to avoid clutter
+    out_dir = Path.cwd()
     tex_path = out_dir / "output.tex"
-    pdf_path = out_dir / "output.pdf"
+    temp_pdf_path = out_dir / "output.pdf"
 
     tex_path.write_text(TEX, encoding="utf-8")
     print(f"Wrote {tex_path}")
@@ -80,10 +92,17 @@ def main():
             print("\nCompilation failed. Check console output for errors.")
         sys.exit(1)
 
-    if pdf_path.exists():
+    if temp_pdf_path.exists():
+        shutil.move(str(temp_pdf_path), str(pdf_path))
         print(f"Success! PDF at: {pdf_path}")
     else:
         print("Compilation finished but output.pdf not found—check logs.")
+
+    # Clean up LaTeX auxiliary files
+    for ext in (".aux", ".log", ".out", ".tex"):
+        aux_file = out_dir / f"output{ext}"
+        if aux_file.exists():
+            aux_file.unlink()
 
 if __name__ == "__main__":
     main()
