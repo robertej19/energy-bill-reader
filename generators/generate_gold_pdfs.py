@@ -5,6 +5,9 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.lib.units import inch
 from pathlib import Path
 import textwrap, json, math, random
+from PIL import Image
+import fitz  # PyMuPDF
+from generators.image_generator import pdf_to_image_pdf
 
 PAGE_SIZES = {"LETTER": LETTER, "A4": A4}
 
@@ -131,7 +134,7 @@ def render_spec_to_pdf(spec, out_dir="gold_out", filename="doc"):
 
             # Move to next column/page if needed
             def ensure_space(height_needed):
-                nonlocal col_i, x, y_top, col_w, cursor_y
+                nonlocal col_i, x, y_top, col_w, cursor_y, cols, page_gold
                 if cursor_y - height_needed < margins[3]:
                     # next column or page
                     if col_i + 1 < len(cols):
@@ -196,6 +199,10 @@ def render_spec_to_pdf(spec, out_dir="gold_out", filename="doc"):
     c.save()
     gold_path = out / f"{filename}.gold.json"
     gold_path.write_text(json.dumps(gold, indent=2), encoding="utf-8")
+
+    # Convert the PDF to an image-based PDF and overwrite the original
+    pdf_to_image_pdf(pdf_path, pdf_path)
+
     return pdf_path, gold_path
 
 # ---- Example run with 3 varied specs (pretend these came from an LLM) ----
@@ -203,18 +210,31 @@ if __name__ == "__main__":
     import random
     random.seed(42)
     specs = []
-    for k in range(3):
+    for k in range(2):
         specs.append({
-          "meta":{"title":f"Doc {k+1}","page_size":"LETTER","columns":1 if k==0 else 2,"margins_pt":[72,72,72,72]},
-          "styles":{"base_font":"Helvetica","base_size":10,"heading_font":"Helvetica-Bold",
-                    "heading_sizes":{"h1":16,"h2":13}},
-          "pages":[{"elements":[
-            {"type":"heading","level":"h1","text":f"Report #{k+1}"},
-            {"type":"paragraph","text":"Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * (6+k)},
-            {"type":"table","rows":[["Year","A","B","C"],["2023","10","11","12"],["2024","12","13","15"]],"col_widths":"auto"},
-            {"type":"figure","caption":"Example figure", "height_pt": 120 + 20*k},
-            {"type":"paragraph","text":"Conclusion: Vivamus sagittis lacus vel augue laoreet rutrum."}
-          ]}]
+          "meta": {"title": f"Doc {k+1}", "page_size": "LETTER", "columns": 1 if k==0 else 2, "margins_pt": [72,72,72,72]},
+          "styles": {"base_font": "Helvetica", "base_size": 10, "heading_font": "Helvetica-Bold",
+                    "heading_sizes": {"h1": 16, "h2": 13}},
+          "pages": [
+            {"elements": [
+                {"type": "heading", "level": "h1", "text": f"Report #{k+1} - Page 1"},
+                {"type": "paragraph", "text": ("Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * (8+k)) + "\n" + ("Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. " * (5+k))},
+                {"type": "table", "rows": [["Year","A","B","C"],["2023","10","11","12"],["2024","12","13","15"],["2025","14","15","16"]], "col_widths": "auto"},
+                {"type": "paragraph", "text": "Aliquam erat volutpat. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. " * (3+k)},
+                {"type": "table", "rows": [["Qtr","X","Y"],["Q1","5","7"],["Q2","8","9"],["Q3","6","4"],["Q4","7","8"]], "col_widths": "auto"},
+                {"type": "figure", "caption": "Example figure 1", "height_pt": 120 + 20*k},
+                {"type": "paragraph", "text": "Conclusion: Vivamus sagittis lacus vel augue laoreet rutrum."}
+            ]},
+            {"elements": [
+                {"type": "heading", "level": "h1", "text": f"Report #{k+1} - Page 2"},
+                {"type": "paragraph", "text": ("Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. " * (7+k))},
+                {"type": "table", "rows": [["Item","Value"],["Alpha","100"],["Beta","200"],["Gamma","300"]], "col_widths": "auto"},
+                {"type": "paragraph", "text": "Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. " * (4+k)},
+                {"type": "table", "rows": [["Month","Sales"],["Jan","1200"],["Feb","1100"],["Mar","1300"],["Apr","1250"]], "col_widths": "auto"},
+                {"type": "figure", "caption": "Example figure 2", "height_pt": 100 + 15*k},
+                {"type": "paragraph", "text": "End of page 2: Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum."}
+            ]}
+          ]
         })
     out = Path("gold_out")
     out.mkdir(exist_ok=True)

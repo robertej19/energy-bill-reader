@@ -15,8 +15,8 @@ except Exception:
 # ---------------- Args ----------------
 def parse_args():
     p = argparse.ArgumentParser(description="Auto-tune OCR parameters to minimize CER/WER against gold.")
-    p.add_argument("--gold_dir", type=str, default="./gold",
-                   help="Directory containing *.pdf and matching *.gold.json (default: ./gold)")
+    p.add_argument("--gold_dir", type=str, default="./gold_out",
+                   help="Directory containing *.pdf and matching *.gold.json (default: ./gold_out)")
     p.add_argument("--out", type=str, default="runs/exp1", help="Output directory for caches and reports")
     p.add_argument("--n_trials", type=int, default=20, help="Optuna trials (ignored for --grid)")
     p.add_argument("--n_jobs", type=int, default=4, help="Parallel docs per trial")
