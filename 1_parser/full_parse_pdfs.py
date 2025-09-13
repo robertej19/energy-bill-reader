@@ -130,11 +130,16 @@ def process_pdf(pdf_path: Path, out_root: Path, dpi: int, lang: str, psm: int,
 
 def main():
     args = parse_args()
-    in_path = Path(args.input_path) if args.input_path else lp.pdf_directory
+    if args.input_path:
+        in_paths = [Path(args.input_path)]
+    else:
+        in_paths = [lp.latex_pdf_directory, lp.image_pdf_directory]
     out_root = Path(args.out); out_root.mkdir(parents=True, exist_ok=True)
-    pdfs = discover_pdfs(in_path)
+    pdfs = []
+    for in_path in in_paths:
+        pdfs.extend(discover_pdfs(in_path))
     if not pdfs:
-        raise SystemExit(f"No PDFs found under: {in_path}")
+        raise SystemExit(f"No PDFs found under: {in_paths}")
 
     index = []
     for pdf in pdfs:

@@ -24,7 +24,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for pdf_file in input_dir.glob("*.pdf"):
-        output_pdf = output_dir / pdf_file.name
+        output_pdf = output_dir / f"image_{pdf_file.name}"
         print(f"Converting {pdf_file} -> {output_pdf}")
         pdf_to_image_pdf(pdf_file, output_pdf)
     print("Done.")
