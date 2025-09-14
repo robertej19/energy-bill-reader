@@ -7,7 +7,9 @@ from pathlib import Path
 import textwrap, json, math, random
 from PIL import Image
 import fitz  # PyMuPDF
-from generators.image_generator import pdf_to_image_pdf
+from data_generators.image_generator import pdf_to_image_pdf
+from config import local_params
+from data_generators.schemas import Document
 
 PAGE_SIZES = {"LETTER": LETTER, "A4": A4}
 
@@ -101,26 +103,26 @@ def layout_columns(page_w, page_h, margins, ncols, gutter=18):
         cols.append((x, y_top, col_w))
     return cols
 
-def render_spec_to_pdf(spec, out_dir="gold_out", filename="doc"):
+def render_spec_to_pdf(doc: Document, out_dir="gold_out", filename="doc"):
     out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
-    meta = spec["meta"]
-    styles = spec.get("styles", {})
-    base_font = styles.get("base_font", "Helvetica")
-    base_size = styles.get("base_size", 10)
-    heading_font = styles.get("heading_font", "Helvetica-Bold")
-    heading_sizes = styles.get("heading_sizes", {"h1":16,"h2":13,"h3":12})
-    page_size = PAGE_SIZES.get(meta.get("page_size","LETTER"), LETTER)
-    ncols = int(meta.get("columns", 1))
-    margins = meta.get("margins_pt", [72,72,72,72])
-    line_gap = styles.get("line_gap", 1.2)
+    meta = doc.meta
+    styles = doc.styles
+    base_font = styles.base_font
+    base_size = styles.base_size
+    heading_font = styles.heading_font
+    heading_sizes = styles.heading_sizes.model_dump()
+    page_size = PAGE_SIZES.get(meta.page_size, LETTER)
+    ncols = meta.columns
+    margins = meta.margins_pt
+    line_gap = getattr(styles, 'line_gap', 1.2)  # line_gap might not be in schema
 
     pdf_path = out / f"{filename}.pdf"
     c = canvas.Canvas(str(pdf_path), pagesize=page_size)
     W, H = page_size
 
-    gold = {"meta": meta, "pages": []}
+    gold = {"meta": meta.model_dump(), "pages": []}
 
-    for p_idx, page in enumerate(spec["pages"]):
+    for p_idx, page in enumerate(doc.pages):
         # reset to first column on each page
         cols = layout_columns(W, H, margins, ncols)
         col_i = 0; x, y_top, col_w = cols[col_i]
@@ -129,8 +131,8 @@ def render_spec_to_pdf(spec, out_dir="gold_out", filename="doc"):
 
         page_gold = {"size": [W, H], "elements": []}
 
-        for el in page["elements"]:
-            et = el["type"]
+        for el in page.elements:
+            et = el.type
 
             # Move to next column/page if needed
             def ensure_space(height_needed):
@@ -151,9 +153,9 @@ def render_spec_to_pdf(spec, out_dir="gold_out", filename="doc"):
                         page_gold = {"size":[W,H], "elements":[]}
 
             if et == "heading":
-                lvl = el.get("level","h2")
+                lvl = el.level
                 size = heading_sizes.get(lvl, base_size+2)
-                text = el["text"]
+                text = el.text
                 ensure_space(size*2)
                 c.setFont(heading_font, size)
                 c.drawString(x, cursor_y, text)
@@ -162,7 +164,7 @@ def render_spec_to_pdf(spec, out_dir="gold_out", filename="doc"):
                 cursor_y -= size * 1.4
 
             elif et == "paragraph":
-                text = el["text"]
+                text = el.text
                 # rough estimate lines: wrap first, then ensure space
                 lines = wrap_text(text, base_font, base_size, col_w, c)
                 need_h = max(line_h * max(1,len(lines)), line_h*1.2)
@@ -172,11 +174,11 @@ def render_spec_to_pdf(spec, out_dir="gold_out", filename="doc"):
                 cursor_y -= line_h * 0.5
 
             elif et == "table":
-                rows = el["rows"]
-                row_h = el.get("row_h", base_size*1.8)
+                rows = el.rows
+                row_h = getattr(el, 'row_h', base_size*1.8)  # row_h not in schema, use default
                 ensure_space(row_h * len(rows) + base_size*2)
                 cursor_y, tbbox, cells = draw_table(
-                    c, rows, x, cursor_y, el.get("col_widths","auto"), row_h,
+                    c, rows, x, cursor_y, el.col_widths, row_h,
                     base_font, base_size
                 )
                 page_gold["elements"].append({"type":"table","rows":len(rows),"cols":max(len(r) for r in rows),
@@ -184,10 +186,10 @@ def render_spec_to_pdf(spec, out_dir="gold_out", filename="doc"):
                 cursor_y -= base_size
 
             elif et == "figure":
-                fig_h = float(el.get("height_pt", 120))
+                fig_h = float(el.height_pt)
                 ensure_space(fig_h + base_size*2)
                 cursor_y, fbbox, cap_bbox = draw_figure_placeholder(
-                    c, el.get("caption",""), x, cursor_y, col_w, fig_h,
+                    c, el.caption, x, cursor_y, col_w, fig_h,
                     base_font, base_size
                 )
                 page_gold["elements"].append({"type":"figure","bbox":fbbox,"caption_bbox":cap_bbox})
@@ -210,7 +212,7 @@ if __name__ == "__main__":
     import random
     random.seed(42)
     specs = []
-    for k in range(2):
+    for k in range(1):
         specs.append({
           "meta": {"title": f"Doc {k+1}", "page_size": "LETTER", "columns": 1 if k==0 else 2, "margins_pt": [72,72,72,72]},
           "styles": {"base_font": "Helvetica", "base_size": 10, "heading_font": "Helvetica-Bold",
@@ -236,8 +238,9 @@ if __name__ == "__main__":
             ]}
           ]
         })
-    out = Path("gold_out")
-    out.mkdir(exist_ok=True)
+    out = local_params.gold_data_location
+    out.mkdir(parents=True, exist_ok=True)
     for i, spec in enumerate(specs, 1):
-        pdf_path, gold_path = render_spec_to_pdf(spec, out_dir=str(out), filename=f"doc_{i}")
+        doc = Document(**spec)  # Convert dict to Document object
+        pdf_path, gold_path = render_spec_to_pdf(doc, out_dir=str(out), filename=f"doc_{i}")
         print("Wrote:", pdf_path, "and", gold_path)
