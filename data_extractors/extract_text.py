@@ -121,11 +121,11 @@ def extract_text_from_pdf(pdf_path, output_dir):
                     word_text = ocr_data['text'][i]
 
                     is_in_table = False
-                    # Expand table rect slightly for more robust intersection check
+                    # Shrink table rect from the bottom to exclude captions
                     for table_idx, table_rect in enumerate(table_rects_pdf):
-                        # Create a padded rect directly from coordinates
-                        padded_table_rect = fitz.Rect(table_rect.x0 - 10, table_rect.y0 - 10, table_rect.x1 + 10, table_rect.y1 + 10) # Increased padding
-                        if word_rect_pdf.intersects(padded_table_rect) and word_text.strip(): # Check intersection and if word is not empty
+                        # Shave off 10 points from the bottom of the rect
+                        adjusted_table_rect = fitz.Rect(table_rect.x0, table_rect.y0, table_rect.x1, table_rect.y1 - 10)
+                        if word_rect_pdf.intersects(adjusted_table_rect) and word_text.strip(): # Check intersection and if word is not empty
                             per_table_words[table_idx].append((word_rect_pdf.x0, word_rect_pdf.y0, word_text)) # Store x,y-coords
                             is_in_table = True
                             break
@@ -174,7 +174,6 @@ def extract_text_from_pdf(pdf_path, output_dir):
     doc.close()
     output_visual_doc.save(output_visual_pdf_path, garbage=4, deflate=True, clean=True)
     output_visual_doc.close()
-    print(f"Saved annotated PDF to: {output_visual_pdf_path}")
     return output_text_path
 
 if __name__ == "__main__":
