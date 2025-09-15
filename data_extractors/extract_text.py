@@ -6,6 +6,7 @@ from PIL import Image
 import os, argparse, csv
 import cv2
 import numpy as np
+import pandas as pd
 from pathlib import Path
 
 # ======================= Rasterization =======================
@@ -38,10 +39,9 @@ def detect_table_boxes_on_image(img_rgb: np.ndarray):
 
     horiz = cv2.dilate(cv2.erode(bin_inv, hk, 1), hk, 1)
     vert  = cv2.dilate(cv2.erode(bin_inv, vk, 1), vk, 1)
-
     lines = cv2.bitwise_or(horiz, vert)
-    contours, _ = cv2.findContours(lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+    contours, _ = cv2.findContours(lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     boxes = []
     min_area = (w * h) * 0.005  # permissive
     for c in contours:
@@ -52,7 +52,6 @@ def detect_table_boxes_on_image(img_rgb: np.ndarray):
         if (roi > 0).mean() < 0.02:
             continue
         boxes.append((x, y, x + ww, y + hh))
-
     boxes.sort(key=lambda b: (b[1], b[0]))
     return boxes
 
@@ -87,127 +86,118 @@ def extract_grid_lines(img_rgb: np.ndarray, box):
     v_lines = _peaks_1d(xs, thr_ratio=0.35, min_gap=max(3, w//200))
     return v_lines, h_lines
 
-# ======================= OCR helpers =======================
+# ======================= OCR (DataFrame, keeps line ids) =======================
 
-def parse_conf(c):
-    try:
-        return float(c)
-    except Exception:
-        return -1.0
-
-def image_to_tokens(img: Image.Image, lang="eng", psm=3, conf_thr=0.0):
-    """Return list of tokens (x,y,w,h,text,conf) from pytesseract.image_to_data."""
-    data = pytesseract.image_to_data(
+def image_to_df(img: Image.Image, lang="eng", psm=3) -> pd.DataFrame:
+    """Return pytesseract DATAFRAME (keeps block/par/line ids)."""
+    df = pytesseract.image_to_data(
         img, lang=lang,
         config=f"--oem 3 --psm {psm} -c preserve_interword_spaces=1",
-        output_type=Output.DICT
+        output_type=Output.DATAFRAME
     )
-    out = []
-    n = len(data["text"])
-    for i in range(n):
-        text = (data["text"][i] or "").strip()
-        if not text:
-            continue
-        conf = parse_conf(data["conf"][i])
-        if conf < conf_thr:   # keep low conf by default
-            continue
-        x, y = int(data["left"][i]), int(data["top"][i])
-        w, h = int(data["width"][i]), int(data["height"][i])
-        out.append((x, y, w, h, text, conf))
-    return out
+    if df is None or df.empty:
+        return pd.DataFrame(columns=[
+            "level","page_num","block_num","par_num","line_num","word_num",
+            "left","top","width","height","conf","text"
+        ])
+    df = df.dropna(subset=["text"]).copy()
+    df["text"] = df["text"].astype(str).str.strip()
+    df["conf"] = pd.to_numeric(df["conf"], errors="coerce").fillna(-1.0)
+    # keep >= 0 (0 often valid); drop blanks
+    df = df[(df["text"] != "") & (df["conf"] >= 0)]
+    # ensure columns present
+    for c in ("block_num","par_num","line_num","left","top","width","height"):
+        if c not in df.columns:
+            df[c] = 0
+    return df
 
-def tokens_filter_outside_boxes(tokens, boxes_px):
-    """Keep tokens whose centers are not inside any table box."""
-    if not boxes_px:
-        return tokens
-    kept = []
-    for x,y,w,h,txt,conf in tokens:
-        cx, cy = x + w/2.0, y + h/2.0
-        inside = False
-        for X0,Y0,X1,Y1 in boxes_px:
-            if (X0 <= cx <= X1) and (Y0 <= cy <= Y1):
-                inside = True
-                break
-        if not inside:
-            kept.append((x,y,w,h,txt,conf))
-    return kept
+def filter_df_outside_boxes(df: pd.DataFrame, boxes_px):
+    """Filter out tokens whose centers fall inside any excluded box."""
+    if df.empty or not boxes_px:
+        return df
+    cx = df["left"].values + df["width"].values/2.0
+    cy = df["top"].values  + df["height"].values/2.0
+    keep = np.ones(len(df), dtype=bool)
+    for x0,y0,x1,y1 in boxes_px:
+        inside = (cx >= x0) & (cx <= x1) & (cy >= y0) & (cy <= y1)
+        keep &= ~inside
+    return df.loc[keep].copy()
 
-# ======================= Text reconstruction =======================
+# ======================= Line & paragraph reconstruction =======================
 
-def reconstruct_lines_from_tokens(tokens, max_spaces=12):
-    """Build lines with bboxes; dynamic line threshold from median height."""
-    if not tokens:
+def reconstruct_lines_from_df(df: pd.DataFrame, max_spaces=12):
+    """
+    Reconstruct lines using Tesseract's line ids to avoid cross-row mixing.
+    Returns list of dicts: {text, bbox_px}
+    """
+    if df.empty:
         return []
-    tokens = sorted(tokens, key=lambda t: (t[1], t[0]))
-    heights = [h for _,_,_,h,_,_ in tokens]
-    med_h = float(np.median(heights)) if heights else 10.0
-    gap_thr = 1.4 * med_h
+
+    # Sort by block / paragraph / line / x (left)
+    df = df.sort_values(["block_num","par_num","line_num","left"]).copy()
 
     lines = []
-    cur = [tokens[0]]
-    for prev, cur_tok in zip(tokens, tokens[1:]):
-        _, y0p, _, hp, _, _ = prev
-        _, y0c, _, hc, _, _ = cur_tok
-        y1p = y0p + hp
-        if y0c - y1p > gap_thr:
-            lines.append(cur)
-            cur = [cur_tok]
-        else:
-            cur.append(cur_tok)
-    if cur:
-        lines.append(cur)
+    for (blk, par, ln), g in df.groupby(["block_num","par_num","line_num"], sort=True):
+        g = g.sort_values("left")
+        # char width estimate
+        widths = g["width"].astype(float).values
+        chars  = g["text"].str.len().replace(0,1).astype(float).values
+        cw_med = max(2.0, float(np.median(widths / chars)) if len(g) else 8.0)
 
-    out = []
-    for line in lines:
-        line = sorted(line, key=lambda t: t[0])
-        widths = [w/max(1,len(txt)) for _,_,w,_,txt,_ in line]
-        cw = max(2.0, float(np.median(widths)) if widths else 8.0)
         parts = []
         prev_right = None
-        for x,y,w,h,txt,_ in line:
+        for _, r in g.iterrows():
+            word = r["text"]
+            left = float(r["left"]); width = float(r["width"])
             if prev_right is None:
-                parts.append(txt)
+                parts.append(word)
             else:
-                gap_px = max(0.0, x - prev_right)
-                spaces = int(round(gap_px / cw))
+                gap_px = max(0.0, left - prev_right)
+                spaces = int(round(gap_px / cw_med))
                 spaces = 1 if spaces <= 0 else min(spaces, max_spaces)
-                parts.append(" " * spaces + txt)
-            prev_right = x + w
-        x0 = min(x for x,_,_,_,_,_ in line); y0 = min(y for _,y,_,_,_,_ in line)
-        x1 = max(x+w for x,_,w,_,_,_ in line); y1 = max(y+h for _,y,_,h,_,_ in line)
-        out.append((x0,y0,x1,y1,"".join(parts)))
-    return out  # list of (x0,y0,x1,y1,text)
+                parts.append(" " * spaces + word)
+            prev_right = left + width
+
+        x0 = float(g["left"].min()); y0 = float(g["top"].min())
+        x1 = float((g["left"] + g["width"]).max()); y1 = float((g["top"] + g["height"]).max())
+        lines.append({"bbox_px": (x0,y0,x1,y1), "text": "".join(parts)})
+
+    # reading order among lines is preserved by sort above
+    return lines
 
 def join_lines_to_paragraphs(lines):
     """Group consecutive lines into paragraphs using vertical gaps."""
     if not lines:
         return []
-    heights = [(y1-y0) for x0,y0,x1,y1,_ in lines]
+    heights = [y1-y0 for (x0,y0,x1,y1) in (L["bbox_px"] for L in lines)]
     med_h = float(np.median(heights)) if heights else 10.0
     gap_thr = 1.4 * med_h
+
     paras = []
     cur = [lines[0]]
     for prev, cur_line in zip(lines, lines[1:]):
-        _, _, _, y1p, _ = prev
-        _, y0c, _, _, _ = cur_line
+        _, y0p, _, y1p = prev["bbox_px"]
+        x0c, y0c, _, _ = cur_line["bbox_px"]
         if y0c - y1p > gap_thr:
             paras.append(cur); cur = [cur_line]
         else:
             cur.append(cur_line)
     if cur: paras.append(cur)
+
     out = []
-    for plines in paras:
-        x0 = min(l[0] for l in plines); y0 = min(l[1] for l in plines)
-        x1 = max(l[2] for l in plines); y1 = max(l[3] for l in plines)
-        text = "\n".join(l[4].replace("\u00ad","") for l in plines).strip()
+    for pl in paras:
+        x0 = min(L["bbox_px"][0] for L in pl)
+        y0 = min(L["bbox_px"][1] for L in pl)
+        x1 = max(L["bbox_px"][2] for L in pl)
+        y1 = max(L["bbox_px"][3] for L in pl)
+        text = "\n".join(L["text"].replace("\u00ad","") for L in pl).strip()
         if text:
             out.append((x0,y0,x1,y1,text))
     return out
 
-# ======================= Table OCR (cell-aware) =======================
+# ======================= Table OCR (cell-aware + fallback) =======================
 
 def ocr_table_by_grid(pil_img, table_box, v_lines, h_lines, lang="eng"):
-    """OCR each cell (using v/h lines). Return 2D list of cell strings."""
     x0,y0,x1,y1 = table_box
     if len(v_lines) < 2 or len(h_lines) < 2:
         return []
@@ -229,48 +219,68 @@ def ocr_table_by_grid(pil_img, table_box, v_lines, h_lines, lang="eng"):
         grid.append(row)
     return grid
 
-def ocr_table_fallback_tokens(pil_img, table_box, lang="eng", conf_thr=0.0):
-    """No clear grid; OCR tokens on crop, build rows by Y and columns via vertical projections."""
+def ocr_table_fallback_tokens(pil_img, table_box, lang="eng"):
     x0,y0,x1,y1 = table_box
     crop = pil_img.crop((x0,y0,x1,y1))
-    data = image_to_tokens(crop, lang=lang, psm=6, conf_thr=conf_thr)
-    if not data:
+    # Use DF here too to keep line structure if available
+    df = image_to_df(crop, lang=lang, psm=6)
+    if df.empty:
         return []
-    # rows
-    data = sorted(data, key=lambda t: (t[1], t[0]))
-    heights = [h for _,_,_,h,_,_ in data]
-    med_h = float(np.median(heights)) if heights else 12.0
-    gap_thr = 0.7 * med_h
-    rows, cur = [], [data[0]]
-    for prev, curtok in zip(data, data[1:]):
-        _, yp, _, hp, _, _ = prev
-        _, yc, _, _, _, _ = curtok
-        if yc - (yp + hp) > gap_thr:
-            rows.append(cur); cur = [curtok]
-        else:
-            cur.append(curtok)
-    if cur: rows.append(cur)
-    # columns (projections)
-    W = x1 - x0
-    xs = np.zeros(W, dtype=np.int32)
-    for x,y,w,h,txt,_ in data:
-        cx = int(x + w/2); cx = min(max(0, cx), W-1)
-        xs[cx] += 1
-    v_peaks = _peaks_1d(xs, thr_ratio=0.25, min_gap=max(5, W//80))
-    if len(v_peaks) < 2:
-        return [[" ".join([t[4] for t in row])] for row in rows]
-    v_peaks = sorted(v_peaks)
-    cuts = [0] + [int((a+b)/2) for a,b in zip(v_peaks, v_peaks[1:])] + [W]
-    grid = []
-    for row in rows:
-        cols = [[] for _ in range(len(cuts)-1)]
-        for x,y,w,h,txt,_ in sorted(row, key=lambda t: t[0]):
-            cx = x + w/2
-            for j in range(len(cuts)-1):
-                if cuts[j] <= cx < cuts[j+1]:
-                    cols[j].append(txt); break
-        grid.append([" ".join(c).strip() for c in cols])
-    return grid
+    # Rows by line_num primarily; fallback to y clustering if needed
+    if "line_num" in df.columns and df["line_num"].nunique() >= 1:
+        dfs = df.sort_values(["block_num","par_num","line_num","left"])
+        rows = [g["text"].tolist() for _, g in dfs.groupby(["block_num","par_num","line_num"])]
+        # columnization: simple multi-space split on joined strings (heuristic)
+        grid = []
+        for toks in rows:
+            s = " ".join(toks)
+            cols = [c.strip() for c in re_split_multi_space(s)]
+            grid.append(cols if cols else [s])
+        return grid
+    else:
+        # Projection fallback
+        data = []
+        for _, r in df.iterrows():
+            data.append((int(r["left"]), int(r["top"]), int(r["width"]), int(r["height"]), r["text"], float(r["conf"])))
+        # group rows
+        data = sorted(data, key=lambda t: (t[1], t[0]))
+        heights = [h for _,_,_,h,_,_ in data]
+        med_h = float(np.median(heights)) if heights else 12.0
+        gap_thr = 0.7 * med_h
+        rows, cur = [], [data[0]]
+        for prev, curtok in zip(data, data[1:]):
+            _, yp, _, hp, _, _ = prev
+            _, yc, _, _, _, _ = curtok
+            if yc - (yp + hp) > gap_thr:
+                rows.append(cur); cur = [curtok]
+            else:
+                cur.append(curtok)
+        if cur: rows.append(cur)
+        # columns via vertical projections
+        W = x1 - x0
+        xs = np.zeros(W, dtype=np.int32)
+        for x,y,w,h,txt,_ in data:
+            cx = int(x + w/2); cx = min(max(0, cx), W-1)
+            xs[cx] += 1
+        v_peaks = _peaks_1d(xs, thr_ratio=0.25, min_gap=max(5, W//80))
+        if len(v_peaks) < 2:
+            return [[" ".join([t[4] for t in row])] for row in rows]
+        v_peaks = sorted(v_peaks)
+        cuts = [0] + [int((a+b)/2) for a,b in zip(v_peaks, v_peaks[1:])] + [W]
+        grid = []
+        for row in rows:
+            cols = [[] for _ in range(len(cuts)-1)]
+            for x,_,w,_,txt,_ in sorted(row, key=lambda t: t[0]):
+                cx = x + w/2
+                for j in range(len(cuts)-1):
+                    if cuts[j] <= cx < cuts[j+1]:
+                        cols[j].append(txt); break
+            grid.append([" ".join(c).strip() for c in cols])
+        return grid
+
+import re
+def re_split_multi_space(s: str):
+    return re.split(r"\s{2,}|\t+", s)
 
 # ======================= Drawing =======================
 
@@ -284,13 +294,12 @@ def draw_regions(page: fitz.Page, scale: float, tables_px):
 
 def extract_text_from_pdf(pdf_path, output_dir,
                           lang="eng", dpi=300,
-                          conf_thr=0.0, # keep 0-confidence tokens too
                           save_table_csv=True):
     doc = fitz.open(pdf_path)
     os.makedirs(output_dir, exist_ok=True)
 
     base = Path(pdf_path).stem
-    out_text = Path(output_dir, base + "_extracted_text.txt")     # <-- now includes placeholders
+    out_text = Path(output_dir, base + "_extracted_text.txt")     # includes placeholders
     out_tabs = Path(output_dir, base + "_extracted_tables.txt")   # debug: raw table dumps
     out_vis  = Path(output_dir, base + "_regions.pdf")
 
@@ -309,11 +318,11 @@ def extract_text_from_pdf(pdf_path, output_dir,
             table_boxes_px = detect_table_boxes_on_image(img)
             draw_regions(vis_page, scale, table_boxes_px)
 
-            # 2) page OCR for non-table text
-            page_tokens = image_to_tokens(pil, lang=lang, psm=3, conf_thr=conf_thr)
-            non_table_tokens = tokens_filter_outside_boxes(page_tokens, table_boxes_px)
-            text_lines = reconstruct_lines_from_tokens(non_table_tokens)
-            paras = join_lines_to_paragraphs(text_lines)  # [(x0,y0,x1,y1,text)]
+            # 2) page OCR DF for non-table text (keeps line ids)
+            df_page = image_to_df(pil, lang=lang, psm=3)
+            df_page = filter_df_outside_boxes(df_page, table_boxes_px)
+            lines = reconstruct_lines_from_df(df_page)
+            paras = join_lines_to_paragraphs(lines)  # [(x0,y0,x1,y1,text)]
 
             # 3) per-table OCR & CSV; build table items with label + bbox
             table_items = []  # [{bbox_px, label, csv_path}]
@@ -328,13 +337,13 @@ def extract_text_from_pdf(pdf_path, output_dir,
                     grid = ocr_table_by_grid(pil, box, v_lines, h_lines, lang=lang)
                     source = "grid"
                     if not grid:
-                        grid = ocr_table_fallback_tokens(pil, box, lang=lang, conf_thr=conf_thr)
+                        grid = ocr_table_fallback_tokens(pil, box, lang=lang)
                         source = "fallback"
 
-                    label = f"table_{t_idx:02d}.csv"  # <-- placeholder label
+                    label = f"table_{t_idx:02d}.csv"
                     csv_path = page_dir / label if save_table_csv else None
 
-                    # Write debug dump + CSV
+                    # Debug dump + CSV
                     f_tab.write(f"{label} [{source}] (px: {box})\n")
                     max_cols = max((len(r) for r in grid), default=0)
                     for row in grid:
@@ -355,21 +364,21 @@ def extract_text_from_pdf(pdf_path, output_dir,
                     })
                 f_tab.write("\n")
 
-            # 4) Merge paragraphs and table placeholders by reading order (top-to-bottom, left-to-right)
+            # 4) Merge paragraphs and table placeholders by reading order (y0,x0)
             stream_items = []
             for x0,y0,x1,y1,text in paras:
                 stream_items.append(("para", (x0,y0,x1,y1), text))
             for ti in table_items:
                 x0,y0,x1,y1 = ti["bbox_px"]
                 stream_items.append(("table", (x0,y0,x1,y1), ti["label"]))
-            stream_items.sort(key=lambda it: (it[1][1], it[1][0]))  # by y0 then x0
+            stream_items.sort(key=lambda it: (it[1][1], it[1][0]))
 
-            # 5) Write the merged stream to the main text file (with table placeholders)
+            # 5) Write merged stream (placeholders inline)
             f_text.write(f"--- Page {pno+1} ---\n")
             for kind, bbox, payload in stream_items:
                 if kind == "para":
                     f_text.write(payload + "\n")
-                else:  # table placeholder
+                else:
                     f_text.write(payload + "\n")
             f_text.write("\n")
 
@@ -381,33 +390,17 @@ def extract_text_from_pdf(pdf_path, output_dir,
 # ======================= CLI =======================
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(
-        description="Extract text + tables from a PDF using OCR, with inline table placeholders."
-    )
-    ap.add_argument(
-        "pdf_path",
-        type=str,
-        nargs="?",
-        default="input_data/synthetic_data/gold_pdfs/doc_1.pdf",
-    )
+    ap = argparse.ArgumentParser(description="Extract text + tables with correct line order and inline table placeholders.")
+    ap.add_argument("pdf_path", type=str, nargs="?", default="input_data/synthetic_data/gold_pdfs/doc_1.pdf")
     ap.add_argument("--output_dir", type=str, default="output/")
     ap.add_argument("--dpi", type=int, default=300)
     ap.add_argument("--lang", type=str, default="eng")
-    ap.add_argument(
-        "--conf-thr",
-        type=float,
-        default=0.0,
-        help="Min Tesseract confidence to keep a token (default keeps 0).",
-    )
-    ap.add_argument(
-        "--no-csv", action="store_true", help="Do not save per-table CSV files"
-    )
+    ap.add_argument("--no-csv", action="store_true", help="Do not save per-table CSV files")
     args = ap.parse_args()
 
     out_file = extract_text_from_pdf(
         args.pdf_path, args.output_dir,
         lang=args.lang, dpi=args.dpi,
-        conf_thr=args.conf_thr,
         save_table_csv=(not args.no_csv)
     )
-    print(f"[✓] Text (with table placeholders) saved to {out_file}")
+    print(f"[✓] Text (with placeholders, correct line order) saved to {out_file}")

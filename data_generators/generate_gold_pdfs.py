@@ -220,7 +220,7 @@ if __name__ == "__main__":
           "pages": [
             {"elements": [
                 {"type": "heading", "level": "h1", "text": f"Report #{k+1} - Page 1"},
-                {"type": "paragraph", "text": ("Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * (8+k)) + "\n" + ("Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. " * (5+k))},
+                {"type": "paragraph", "text": ("This is a sample sentence used to determine reconstruction order. " * (8+k)) + "\n" + ("Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. " * (5+k))},
                 {"type": "table", "rows": [["Year","A","B","C"],["2023","10","11","12"],["2024","12","13","15"],["2025","14","15","16"]], "col_widths": "auto"},
                 {"type": "paragraph", "text": "Aliquam erat volutpat. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. " * (3+k)},
                 {"type": "table", "rows": [["Qtr","X","Y"],["Q1","5","7"],["Q2","8","9"],["Q3","6","4"],["Q4","7","8"]], "col_widths": "auto"},
@@ -238,7 +238,7 @@ if __name__ == "__main__":
             ]}
           ]
         })
-    out = local_params.gold_data_location
+    out = local_params.gold_input_data_location
     out.mkdir(parents=True, exist_ok=True)
     for i, spec in enumerate(specs, 1):
         doc = Document(**spec)  # Convert dict to Document object
