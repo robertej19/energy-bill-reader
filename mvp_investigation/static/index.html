@@ -116,15 +116,16 @@
       pdfImg.onerror = reject;
       pdfImg.src = src;
     });
-    // Set SVG overlay size to natural image size (300 dpi baseline)
-    const w = pdfImg.naturalWidth;
-    const h = pdfImg.naturalHeight;
-    pdfOverlay.setAttribute('width', String(w));
-    pdfOverlay.setAttribute('height', String(h));
-    pdfOverlay.style.width = w + 'px';
-    pdfOverlay.style.height = h + 'px';
-    // Make overlay exactly overlap the image
+    // Set SVG overlay to match the rendered image size, but use a viewBox
+    // to keep the coordinate system the same as the natural image dimensions.
     const rect = pdfImg.getBoundingClientRect();
+    pdfOverlay.setAttribute('viewBox', `0 0 ${pdfImg.naturalWidth} ${pdfImg.naturalHeight}`);
+    pdfOverlay.setAttribute('width', String(rect.width));
+    pdfOverlay.setAttribute('height', String(rect.height));
+    pdfOverlay.style.width = rect.width + 'px';
+    pdfOverlay.style.height = rect.height + 'px';
+
+    // Make overlay exactly overlap the image
     pdfOverlay.style.position = 'absolute';
     pdfOverlay.style.left = pdfImg.offsetLeft + 'px';
     pdfOverlay.style.top = pdfImg.offsetTop + 'px';
@@ -137,18 +138,20 @@
   function drawHighlight(bbox_px) {
     if (!bbox_px) return;
     const [x0, y0, x1, y1] = bbox_px.map(Number);
-    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    rect.setAttribute('x', String(x0));
-    rect.setAttribute('y', String(y0));
-    rect.setAttribute('width', String(Math.max(1, x1 - x0)));
-    rect.setAttribute('height', String(Math.max(1, y1 - y0)));
-    rect.setAttribute('class', 'highlight-rect');
-    pdfOverlay.appendChild(rect);
+    const rectEl = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rectEl.setAttribute('x', String(x0));
+    rectEl.setAttribute('y', String(y0));
+    rectEl.setAttribute('width', String(Math.max(1, x1 - x0)));
+    rectEl.setAttribute('height', String(Math.max(1, y1 - y0)));
+    rectEl.setAttribute('class', 'highlight-rect');
+    pdfOverlay.appendChild(rectEl);
 
-    // Auto scroll: ensure highlighted area is visible
+    // Auto scroll: ensure highlighted area is visible.
+    // This needs to be scaled from natural coordinates to displayed coordinates.
+    const scale = pdfImg.getBoundingClientRect().width / pdfImg.naturalWidth;
     const pad = 40;
-    const targetX = x0 * zoom - pad;
-    const targetY = y0 * zoom - pad;
+    const targetX = (x0 * scale * zoom) - pad;
+    const targetY = (y0 * scale * zoom) - pad;
     pdfStage.scrollTo({ left: Math.max(0, targetX), top: Math.max(0, targetY), behavior: 'smooth' });
   }
 
