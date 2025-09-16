@@ -15,6 +15,17 @@ STATIC_DIR = APP_DIR / "static"
 OUT_DIR = APP_DIR / "output"
 PDF_NAME = "doc.pdf"
 
+# app.py (add near other imports)
+import fitz
+from functools import lru_cache
+
+PDF_DPI = 300  # must match the dpi used during extraction
+PDF_PATH = STATIC_DIR / PDF_NAME
+PAGES_DIR = OUT_DIR / "pages"
+PAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+
 app = FastAPI(title="PDF RAG MVP with Citations")
 
 # serve frontend & pdf
@@ -28,6 +39,38 @@ class SearchResponse(BaseModel):
 class AnswerResponse(BaseModel):
     answer: str
     hits: list
+
+def _page_png_path(page: int) -> Path:
+    return PAGES_DIR / f"page_{page:04d}_{PDF_DPI}dpi.png"
+
+@lru_cache(maxsize=512)
+def render_page_to_png(page: int, dpi: int = PDF_DPI) -> Path:
+    """Render the given 1-based page to a PNG at dpi; cache on disk."""
+    out = _page_png_path(page)
+    if out.exists():
+        return out
+    doc = fitz.open(str(PDF_PATH))
+    try:
+        if page < 1 or page > doc.page_count:
+            raise ValueError(f"Page out of range: {page}")
+        p = doc.load_page(page - 1)
+        zoom = dpi / 72.0
+        mat = fitz.Matrix(zoom, zoom)
+        pix = p.get_pixmap(matrix=mat, alpha=False)
+        pix.save(str(out))
+        return out
+    finally:
+        doc.close()
+
+@app.get("/page_image")
+def page_image(page: int):
+    """Return a rendered PNG of the page at 300dpi."""
+    try:
+        png_path = render_page_to_png(page, PDF_DPI)
+        return FileResponse(str(png_path), media_type="image/png")
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
 
 @app.get("/", response_class=HTMLResponse)
 def index_page():
