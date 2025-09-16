@@ -68,10 +68,13 @@ def ingest_single_pdf(pdf_path: str, output_dir: str = "output") -> Dict[str, An
 
     def add_unit(doc_id, kind, page, bbox, text, extra=None):
         item_id = f"{doc_id}|{kind}|p{page}|{len(retr_items)}"
-        retr_items.append({"item_id": item_id, "doc_id": doc_id, "kind": kind, "page": page, "bbox_px": bbox, "text": text})
-        meta = {"item_id": item_id, "doc_id": doc_id, "kind": kind, "page": page, "bbox_px": bbox}
+        retr_items.append({"item_id": item_id, "doc_id": doc_id, "kind": kind,
+                        "page": page, "bbox_px": bbox, "text": text})
+        meta = {"item_id": item_id, "doc_id": doc_id, "kind": kind, "page": page,
+                "bbox_px": bbox, "text": text}
         if extra: meta.update(extra)
         meta_records.append(meta)
+
 
     doc_id = Path(pdf_path).stem
     for rec in items:
